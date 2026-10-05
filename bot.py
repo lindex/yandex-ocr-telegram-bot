@@ -1,15 +1,22 @@
-"""Telegram-бот: текст с картинок и PDF (Vision OCR), голос -> текст и текст -> голос (SpeechKit)."""
-import asyncio
-import logging
-import socket
+"""Telegram-бот: текст с картинок и PDF (Vision OCR), голос -> текст и текст -> голос (SpeechKit).
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.filters import CommandStart
-from aiogram.types import BufferedInputFile, Message
-from aiogram.utils.chat_action import ChatActionSender
+Работает по MTProto (Telethon), поэтому может ходить в Telegram через MTProto-прокси (tg://proxy?...).
+"""
+import base64
+import io
+import logging
+from urllib.parse import parse_qs, urlparse
+
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from telethon import TelegramClient, events
+from telethon.network.connection import (
+    ConnectionTcpFull,
+    ConnectionTcpMTProxyIntermediate,
+    ConnectionTcpMTProxyRandomizedIntermediate,
+)
+from telethon.sessions import StringSession
+from TelethonFakeTLS import ConnectionTcpMTProxyFakeTLS
 from yandex_ai_studio_sdk import AsyncAIStudio
 
 
@@ -17,134 +24,116 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     tg_token: SecretStr
+    tg_api_id: int  # https://my.telegram.org -> API development tools
+    tg_api_hash: SecretStr
+    tg_proxy: SecretStr | None = None  # tg://proxy?server=...&port=...&secret=... или https://t.me/proxy?...
     yc_api_key: SecretStr
     yc_folder_id: str
     tts_voice: str = "alena"
-    telegram_proxy: str | None = None  # socks5://user:pass@host:1080 или http://...
-    telegram_api_ip: str | None = None  # обход DNS-блокировки api.telegram.org
 
 
-settings = Settings()
-log = logging.getLogger("ocr_bot")
-dp = Dispatcher()
-sdk = AsyncAIStudio(folder_id=settings.yc_folder_id, auth=settings.yc_api_key.get_secret_value())
-ocr = sdk.vision.ocr(language_codes=["ru", "en"], model="page")
-tts = sdk.speechkit.tts(voice=settings.tts_voice, audio_format="OGG_OPUS", single_chunk_mode=True)
-
-TG_FILE_LIMIT = 20 * 1024 * 1024  # Bot API не отдаёт файлы больше 20 МБ
+MAX_FILE_SIZE = 20 * 1024 * 1024
 TG_TEXT_LIMIT = 4096
 TTS_TEXT_LIMIT = 5000
 STT_FORMATS = {"audio/ogg": "OGG_OPUS", "audio/opus": "OGG_OPUS", "audio/mpeg": "MP3", "audio/mp3": "MP3",
                "audio/wav": "WAV", "audio/x-wav": "WAV"}
-
-
-async def answer_text(message: Message, text: str) -> None:
-    text = text.strip() or "Ничего не распознано."
-    for i in range(0, len(text), TG_TEXT_LIMIT):
-        await message.reply(text[i:i + TG_TEXT_LIMIT], parse_mode=None)
-
-
-async def download(message: Message, file_id: str, size: int | None) -> bytes | None:
-    if size and size > TG_FILE_LIMIT:
-        await message.reply("Файл больше 20 МБ — Telegram не даёт ботам такие скачивать.")
-        return None
-    return (await message.bot.download(file_id)).read()
-
-
-async def recognize_image(message: Message, file_id: str, size: int | None, mime: str) -> None:
-    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
-        if data := await download(message, file_id, size):
-            pages = await ocr.run(data, mime_type=mime, timeout=120)
-            await answer_text(message, "\n\n".join(p.full_text for p in pages))
-
-
-async def recognize_speech(message: Message, file_id: str, size: int | None, audio_format: str) -> None:
-    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
-        if data := await download(message, file_id, size):
-            stt = sdk.speechkit.stt(audio_format=audio_format, language_codes=["ru-RU", "en-US"],
-                                    text_normalization=True)
-            result = await stt.run(data, timeout=300)
-            text = (result.final_refinement_text or result.final_text) if result.channels else ""
-            await answer_text(message, text)
-
-
-@dp.message(CommandStart())
-async def on_start(message: Message) -> None:
-    await message.answer(
-        "Пришлите:\n"
+HELP = ("Пришлите:\n"
         "• картинку или PDF — верну текст с них;\n"
         "• голосовое или аудио — расшифрую в текст;\n"
-        "• текст — озвучу голосовым."
-    )
+        "• текст — озвучу голосовым.")
+
+log = logging.getLogger("ocr_bot")
 
 
-@dp.message(F.photo)
-async def on_photo(message: Message) -> None:
-    photo = message.photo[-1]
-    await recognize_image(message, photo.file_id, photo.file_size, "image/jpeg")
+def parse_proxy(link: str) -> tuple[type, tuple[str, int, str]]:
+    """tg://proxy-ссылка -> (класс соединения Telethon, (host, port, secret)) по типу секрета."""
+    query = {k: v[0] for k, v in parse_qs(urlparse(link).query).items()}
+    host, port, secret = query["server"], int(query["port"]), query["secret"]
+    try:
+        raw = bytes.fromhex(secret)
+    except ValueError:
+        raw = base64.urlsafe_b64decode(secret + "=" * (-len(secret) % 4))
+    if raw[0] == 0xEE:  # fake-TLS: 16 байт ключа + домен маскировки
+        return ConnectionTcpMTProxyFakeTLS, (host, port, raw[1:].hex())
+    if raw[0] == 0xDD:
+        return ConnectionTcpMTProxyRandomizedIntermediate, (host, port, raw.hex())
+    return ConnectionTcpMTProxyIntermediate, (host, port, raw.hex())
 
 
-@dp.message(F.document.mime_type.startswith("image/") | (F.document.mime_type == "application/pdf"))
-async def on_document(message: Message) -> None:
-    doc = message.document
-    await recognize_image(message, doc.file_id, doc.file_size, doc.mime_type)
+settings = Settings()
+sdk = AsyncAIStudio(folder_id=settings.yc_folder_id, auth=settings.yc_api_key.get_secret_value())
+ocr = sdk.vision.ocr(language_codes=["ru", "en"], model="page")
+tts = sdk.speechkit.tts(voice=settings.tts_voice, audio_format="OGG_OPUS", single_chunk_mode=True)
+
+connection, proxy = (parse_proxy(settings.tg_proxy.get_secret_value()) if settings.tg_proxy
+                     else (ConnectionTcpFull, None))
+# ponytail: сессия в памяти — бот логинится заново при каждом рестарте; если упрёмся во флуд-лимит, хранить в volume
+client = TelegramClient(StringSession(), settings.tg_api_id, settings.tg_api_hash.get_secret_value(),
+                        connection=connection, proxy=proxy)
+client.parse_mode = None
 
 
-@dp.message(F.voice)
-async def on_voice(message: Message) -> None:
-    await recognize_speech(message, message.voice.file_id, message.voice.file_size, "OGG_OPUS")
+async def reply_text(event, text: str) -> None:
+    text = text.strip() or "Ничего не распознано."
+    for i in range(0, len(text), TG_TEXT_LIMIT):
+        await event.reply(text[i:i + TG_TEXT_LIMIT])
 
 
-@dp.message(F.audio)
-async def on_audio(message: Message) -> None:
-    audio = message.audio
-    if fmt := STT_FORMATS.get(audio.mime_type or ""):
-        await recognize_speech(message, audio.file_id, audio.file_size, fmt)
-    else:
-        await message.reply("Поддерживаются аудио в форматах OGG/Opus, MP3 и WAV.")
+async def recognize_image(event, mime: str) -> None:
+    async with client.action(event.chat_id, "typing"):
+        pages = await ocr.run(await event.download_media(bytes), mime_type=mime, timeout=120)
+        await reply_text(event, "\n\n".join(p.full_text for p in pages))
 
 
-@dp.message(F.text)
-async def on_text(message: Message) -> None:
-    if len(message.text) > TTS_TEXT_LIMIT:
-        await message.reply(f"Слишком длинный текст: максимум {TTS_TEXT_LIMIT} символов.")
+async def recognize_speech(event, audio_format: str) -> None:
+    async with client.action(event.chat_id, "typing"):
+        stt = sdk.speechkit.stt(audio_format=audio_format, language_codes=["ru-RU", "en-US"], text_normalization=True)
+        result = await stt.run(await event.download_media(bytes), timeout=300)
+        await reply_text(event, (result.final_refinement_text or result.final_text) if result.channels else "")
+
+
+async def synthesize(event) -> None:
+    if len(event.raw_text) > TTS_TEXT_LIMIT:
+        await event.reply(f"Слишком длинный текст: максимум {TTS_TEXT_LIMIT} символов.")
         return
-    async with ChatActionSender.record_voice(bot=message.bot, chat_id=message.chat.id):
-        result = await tts.run(message.text, timeout=120)
-        await message.reply_voice(BufferedInputFile(result.data, "voice.ogg"))
+    async with client.action(event.chat_id, "record-voice"):
+        voice = io.BytesIO((await tts.run(event.raw_text, timeout=120)).data)
+        voice.name = "voice.ogg"
+        await event.reply(file=voice, voice_note=True)
 
 
-@dp.message()
-async def on_other(message: Message) -> None:
-    await message.reply("Пришлите картинку, PDF, голосовое или текст.")
+@client.on(events.NewMessage(incoming=True))
+async def on_message(event) -> None:
+    mime = event.file.mime_type if event.file else ""
+    try:
+        if event.file and event.file.size and event.file.size > MAX_FILE_SIZE:
+            await event.reply("Файл больше 20 МБ — пришлите поменьше.")
+        elif event.photo:
+            await recognize_image(event, "image/jpeg")
+        elif event.document and (mime.startswith("image/") or mime == "application/pdf"):
+            await recognize_image(event, mime)
+        elif event.voice:
+            await recognize_speech(event, "OGG_OPUS")
+        elif event.audio and mime in STT_FORMATS:
+            await recognize_speech(event, STT_FORMATS[mime])
+        elif event.raw_text.startswith("/"):
+            await event.reply(HELP)
+        elif event.raw_text and not event.media:
+            await synthesize(event)
+        else:
+            await event.reply("Поддерживаются картинки, PDF, голосовые, аудио OGG/MP3/WAV и текст.")
+    except Exception:
+        log.exception("Ошибка обработки сообщения")
+        await event.reply("Не получилось обработать, попробуйте ещё раз.")
 
 
-@dp.error()
-async def on_error(event) -> bool:
-    log.exception("Ошибка обработки апдейта", exc_info=event.exception)
-    if message := event.update.message:
-        await message.reply("Не получилось обработать, попробуйте ещё раз.")
-    return True
-
-
-def patch_telegram_dns(ip: str) -> None:
-    original = socket.getaddrinfo
-
-    def getaddrinfo(host, *args, **kwargs):
-        return original(ip if host == "api.telegram.org" else host, *args, **kwargs)
-
-    socket.getaddrinfo = getaddrinfo
-
-
-async def main() -> None:
+def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    if settings.telegram_api_ip:
-        patch_telegram_dns(settings.telegram_api_ip)
-    session = AiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else None
-    bot = Bot(settings.tg_token.get_secret_value(), session=session)
-    await bot.delete_webhook()  # polling не работает при активном вебхуке
-    await dp.start_polling(bot)
+    log.info("Подключение к Telegram %s", f"через {connection.__name__}" if proxy else "напрямую")
+    client.start(bot_token=settings.tg_token.get_secret_value())
+    log.info("Бот запущен")
+    client.run_until_disconnected()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

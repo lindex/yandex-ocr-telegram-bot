@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "Telegram-бот: OCR, синтез и распознавание речи через Yandex AI Studio"
 requires-python = ">=3.13,<3.15"
 dependencies = [
-    "aiogram>=3.31",
-    "aiohttp-socks>=0.10",
+    "cryptg>=0.5",
+    "cryptography>=44",
+    "telethon>=1.45",
+    "telethonfaketls==2022.4.4.16.37.38.728726",
     "pydantic-settings>=2.15",
     "yandex-ai-studio-sdk>=0.22",
 ]
