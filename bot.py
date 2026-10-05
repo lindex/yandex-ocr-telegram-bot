@@ -5,10 +5,11 @@
 import base64
 import io
 import logging
+from typing import Annotated, Literal
 from urllib.parse import parse_qs, urlparse
 
-from pydantic import SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from telethon import TelegramClient, events
 from telethon.network.connection import (
     ConnectionTcpFull,
@@ -30,6 +31,18 @@ class Settings(BaseSettings):
     yc_api_key: SecretStr
     yc_folder_id: str
     tts_voice: str = "alena"
+    tg_admins: Annotated[list[int], NoDecode] = []  # ID админов через запятую: доступ всегда + уведомления о чужих
+    access_mode: Literal["private", "public"] = "private"  # private — только админы и TG_ALLOWED_USERS
+    tg_allowed_users: Annotated[list[int], NoDecode] = []
+
+    @field_validator("tg_admins", "tg_allowed_users", mode="before")
+    @classmethod
+    def split_ids(cls, value: str | list) -> list:
+        return [x.strip() for x in value.split(",") if x.strip()] if isinstance(value, str) else value
+
+    def is_allowed(self, user_id: int) -> bool:
+        return (self.access_mode == "public" or user_id in self.tg_admins
+                or user_id in self.tg_allowed_users)
 
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
@@ -102,8 +115,29 @@ async def synthesize(event) -> None:
         await event.reply(file=voice, voice_note=True)
 
 
+notified_admins_about: set[int] = set()  # ponytail: в памяти — после рестарта админ получит повторное уведомление
+
+
+async def deny(event) -> None:
+    await event.reply(f"Бот приватный. Ваш ID: {event.sender_id} — передайте его администратору.")
+    if event.sender_id in notified_admins_about:
+        return
+    notified_admins_about.add(event.sender_id)
+    sender = await event.get_sender()
+    who = f"@{sender.username}" if getattr(sender, "username", None) else getattr(sender, "first_name", "")
+    for admin in settings.tg_admins:
+        try:
+            await client.send_message(admin, f"Запрос доступа: {who} (ID {event.sender_id}). "
+                                             f"Чтобы пустить, добавьте ID в TG_ALLOWED_USERS.")
+        except Exception:
+            log.warning("Не удалось уведомить админа %s (он должен сначала написать боту)", admin)
+
+
 @client.on(events.NewMessage(incoming=True))
 async def on_message(event) -> None:
+    if not settings.is_allowed(event.sender_id):
+        await deny(event)
+        return
     mime = event.file.mime_type if event.file else ""
     try:
         if event.file and event.file.size and event.file.size > MAX_FILE_SIZE:
@@ -129,6 +163,8 @@ async def on_message(event) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    log.info("Доступ: %s, админов: %d, разрешено: %d", settings.access_mode, len(settings.tg_admins),
+             len(settings.tg_allowed_users))
     log.info("Подключение к Telegram %s", f"через {connection.__name__}" if proxy else "напрямую")
     client.start(bot_token=settings.tg_token.get_secret_value())
     log.info("Бот запущен")

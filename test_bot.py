@@ -1,4 +1,4 @@
-"""Проверка разбора tg://proxy-ссылок: uv run python test_proxy.py"""
+"""Самопроверка: uv run python test_bot.py"""
 import base64
 import os
 
@@ -21,3 +21,11 @@ assert parse_proxy(f"https://t.me/proxy?server=h&port=443&secret={b64}")[1][2] =
 assert parse_proxy(f"tg://proxy?server=h&port=1&secret=dd{key}")[0].__name__ == "ConnectionTcpMTProxyRandomizedIntermediate"
 assert parse_proxy(f"tg://proxy?server=h&port=1&secret={key}")[0].__name__ == "ConnectionTcpMTProxyIntermediate"
 print("ok")
+
+from bot import Settings  # noqa: E402
+
+s = Settings(tg_admins="1, 2", tg_allowed_users="3", access_mode="private")
+assert s.tg_admins == [1, 2] and s.is_allowed(1) and s.is_allowed(3) and not s.is_allowed(4)
+assert Settings(access_mode="public").is_allowed(4)
+assert Settings(tg_admins="").tg_admins == [] and not Settings(tg_admins="").is_allowed(1)
+print("access ok")
