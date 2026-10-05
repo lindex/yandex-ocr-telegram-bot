@@ -37,12 +37,21 @@ Python 3.13 · [Telethon](https://github.com/LonamiWebs/Telethon) + [TelethonFak
 
 | Режим | Кто может пользоваться |
 |---|---|
-| `ACCESS_MODE=private` (по умолчанию) | Только ID из `TG_ADMINS` и `TG_ALLOWED_USERS` |
+| `ACCESS_MODE=private` (по умолчанию) | Админы из `TG_ADMINS` и те, кого админ пустил |
 | `ACCESS_MODE=public` | Все |
 
-- Свой Telegram ID можно узнать у [@userinfobot](https://t.me/userinfobot) или просто написав боту — в приватном режиме он ответит вашим ID.
-- Когда кто-то посторонний пишет боту, админы получают уведомление с его ID и username. Чтобы пустить человека, добавьте ID в `TG_ALLOWED_USERS` и перезапустите бота.
-- Админ должен хотя бы раз написать боту сам, иначе Telegram не даст боту отправить ему уведомление.
+Доступом управляет админ прямо в боте, перезапуск не нужен:
+
+1. Посторонний пишет боту — бот отвечает, что запрос отправлен, а админ получает сообщение с именем, username, ID и кнопками **✅ Разрешить** / **❌ Отклонить**.
+2. После «Разрешить» пользователь получает уведомление и может пользоваться ботом.
+3. Команды админа:
+   - `/users` — у кого есть доступ;
+   - `/allow ID` — дать доступ по ID;
+   - `/deny ID` — забрать доступ.
+
+Свой Telegram ID для `TG_ADMINS` можно узнать у [@userinfobot](https://t.me/userinfobot). Админ должен хотя бы раз написать боту (`/start`), иначе Telegram не даст боту отправить ему запрос.
+
+Список пользователей и сессия Telegram хранятся в `DATA_DIR` (в Docker — `/data`). Подключите туда постоянный том, иначе после передеплоя список обнулится.
 
 ### 4. Переменные окружения
 
@@ -54,9 +63,9 @@ Python 3.13 · [Telethon](https://github.com/LonamiWebs/Telethon) + [TelethonFak
 | `YC_API_KEY` | да | Секретный API-ключ сервисного аккаунта |
 | `YC_FOLDER_ID` | да | ID каталога Yandex Cloud |
 | `TG_PROXY` | нет | Ссылка MTProto-прокси |
-| `TG_ADMINS` | нет | ID админов через запятую: `123456789,987654321` |
+| `TG_ADMINS` | нет* | ID админов через запятую: `123456789,987654321`. *В режиме `private` без админов ботом никто не сможет пользоваться |
 | `ACCESS_MODE` | нет | `private` (по умолчанию) или `public` |
-| `TG_ALLOWED_USERS` | нет | ID разрешённых пользователей через запятую |
+| `DATA_DIR` | нет | Папка для сессии и списка пользователей, по умолчанию `data` (в Docker — `/data`) |
 | `TTS_VOICE` | нет | Голос синтеза, по умолчанию `alena`. [Документация SpeechKit TTS](https://aistudio.yandex.ru/docs/ru/speechkit/tts/index) |
 
 Шаблон — [`.env.example`](.env.example).
@@ -74,10 +83,10 @@ uv run python bot.py
 
 ```bash
 docker build -t ocr-bot-yandex .
-docker run -d --restart unless-stopped --env-file .env ocr-bot-yandex
+docker run -d --restart unless-stopped --env-file .env -v ocr-bot-data:/data ocr-bot-yandex
 ```
 
-В Coolify: приложение из этого репозитория, Build Pack **Dockerfile**, домен не нужен (бот сам ходит в Telegram, входящих подключений нет). Переменные — в **Environment Variables** (блок Production, не Preview).
+В Coolify: приложение из этого репозитория, Build Pack **Dockerfile**, домен не нужен (бот сам ходит в Telegram, входящих подключений нет). Переменные — в **Environment Variables** (блок Production, не Preview). В **Persistent Storage** — том с путём `/data`.
 
 Самопроверка разбора прокси-ссылок и прав доступа:
 
@@ -88,4 +97,4 @@ uv run python test_bot.py
 ## Ограничения
 
 - Файлы больше 20 МБ не принимаются.
-- Сессия Telegram хранится в памяти: при каждом рестарте бот заново логинится по токену. При очень частых рестартах Telegram может временно ограничить вход.
+- Пока админ не ответил на запрос, повторные сообщения от того же человека новых запросов не создают. После рестарта бота запрос может прийти ещё раз.

@@ -6,9 +6,9 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
 
 FROM python:3.13-slim-bookworm
-ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" DATA_DIR=/data
 WORKDIR /app
-RUN useradd --system --uid 1000 bot
+RUN useradd --system --uid 1000 bot && mkdir /data && chown bot /data
 COPY --from=build /app/.venv /app/.venv
 COPY bot.py .
 USER bot

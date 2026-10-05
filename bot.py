@@ -4,19 +4,20 @@
 """
 import base64
 import io
+import json
 import logging
+from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-from telethon import TelegramClient, events
+from telethon import Button, TelegramClient, events
 from telethon.network.connection import (
     ConnectionTcpFull,
     ConnectionTcpMTProxyIntermediate,
     ConnectionTcpMTProxyRandomizedIntermediate,
 )
-from telethon.sessions import StringSession
 from TelethonFakeTLS import ConnectionTcpMTProxyFakeTLS
 from yandex_ai_studio_sdk import AsyncAIStudio
 
@@ -31,18 +32,38 @@ class Settings(BaseSettings):
     yc_api_key: SecretStr
     yc_folder_id: str
     tts_voice: str = "alena"
-    tg_admins: Annotated[list[int], NoDecode] = []  # ID админов через запятую: доступ всегда + уведомления о чужих
-    access_mode: Literal["private", "public"] = "private"  # private — только админы и TG_ALLOWED_USERS
-    tg_allowed_users: Annotated[list[int], NoDecode] = []
+    tg_admins: Annotated[list[int], NoDecode] = []  # ID админов через запятую
+    access_mode: Literal["private", "public"] = "private"  # private — только админы и те, кого они пустили
+    data_dir: Path = Path("data")  # сессия Telegram и список пользователей; в Docker — volume /data
 
-    @field_validator("tg_admins", "tg_allowed_users", mode="before")
+    @field_validator("tg_admins", mode="before")
     @classmethod
     def split_ids(cls, value: str | list) -> list:
         return [x.strip() for x in value.split(",") if x.strip()] if isinstance(value, str) else value
 
-    def is_allowed(self, user_id: int) -> bool:
-        return (self.access_mode == "public" or user_id in self.tg_admins
-                or user_id in self.tg_allowed_users)
+
+class Users:
+    """Пользователи, которых пустил админ. Хранятся в JSON, чтобы переживать рестарты."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.ids: set[int] = set(json.loads(path.read_text())) if path.exists() else set()
+
+    def add(self, user_id: int) -> None:
+        self.ids.add(user_id)
+        self._save()
+
+    def remove(self, user_id: int) -> bool:
+        if user_id not in self.ids:
+            return False
+        self.ids.discard(user_id)
+        self._save()
+        return True
+
+    def _save(self) -> None:
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(sorted(self.ids)))
+        tmp.replace(self.path)
 
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
@@ -54,6 +75,10 @@ HELP = ("Пришлите:\n"
         "• картинку или PDF — верну текст с них;\n"
         "• голосовое или аудио — расшифрую в текст;\n"
         "• текст — озвучу голосовым.")
+ADMIN_HELP = ("\n\nКоманды админа:\n"
+              "/users — у кого есть доступ\n"
+              "/allow ID — дать доступ\n"
+              "/deny ID — забрать доступ")
 
 log = logging.getLogger("ocr_bot")
 
@@ -74,14 +99,15 @@ def parse_proxy(link: str) -> tuple[type, tuple[str, int, str]]:
 
 
 settings = Settings()
+settings.data_dir.mkdir(parents=True, exist_ok=True)
+users = Users(settings.data_dir / "users.json")
 sdk = AsyncAIStudio(folder_id=settings.yc_folder_id, auth=settings.yc_api_key.get_secret_value())
 ocr = sdk.vision.ocr(language_codes=["ru", "en"], model="page")
 tts = sdk.speechkit.tts(voice=settings.tts_voice, audio_format="OGG_OPUS", single_chunk_mode=True)
 
 connection, proxy = (parse_proxy(settings.tg_proxy.get_secret_value()) if settings.tg_proxy
                      else (ConnectionTcpFull, None))
-# ponytail: сессия в памяти — бот логинится заново при каждом рестарте; если упрёмся во флуд-лимит, хранить в volume
-client = TelegramClient(StringSession(), settings.tg_api_id, settings.tg_api_hash.get_secret_value(),
+client = TelegramClient(str(settings.data_dir / "bot"), settings.tg_api_id, settings.tg_api_hash.get_secret_value(),
                         connection=connection, proxy=proxy)
 client.parse_mode = None
 
@@ -115,28 +141,89 @@ async def synthesize(event) -> None:
         await event.reply(file=voice, voice_note=True)
 
 
-notified_admins_about: set[int] = set()  # ponytail: в памяти — после рестарта админ получит повторное уведомление
+def is_admin(user_id: int) -> bool:
+    return user_id in settings.tg_admins
 
 
-async def deny(event) -> None:
-    await event.reply(f"Бот приватный. Ваш ID: {event.sender_id} — передайте его администратору.")
-    if event.sender_id in notified_admins_about:
+def is_allowed(user_id: int) -> bool:
+    return settings.access_mode == "public" or is_admin(user_id) or user_id in users.ids
+
+
+async def describe(user_id: int) -> str:
+    try:
+        user = await client.get_entity(user_id)
+    except Exception:
+        return str(user_id)
+    name = " ".join(filter(None, [user.first_name, user.last_name]))
+    return f"{name} @{user.username} ({user_id})" if user.username else f"{name} ({user_id})"
+
+
+requested: set[int] = set()  # ponytail: в памяти — после рестарта админ может получить повторный запрос
+
+
+async def request_access(event) -> None:
+    await event.reply("Бот приватный. Запрос на доступ отправлен администратору.")
+    if event.sender_id in requested:
         return
-    notified_admins_about.add(event.sender_id)
-    sender = await event.get_sender()
-    who = f"@{sender.username}" if getattr(sender, "username", None) else getattr(sender, "first_name", "")
+    requested.add(event.sender_id)
+    buttons = [Button.inline("✅ Разрешить", f"allow:{event.sender_id}"),
+               Button.inline("❌ Отклонить", f"reject:{event.sender_id}")]
+    text = f"Запрос доступа: {await describe(event.sender_id)}"
     for admin in settings.tg_admins:
         try:
-            await client.send_message(admin, f"Запрос доступа: {who} (ID {event.sender_id}). "
-                                             f"Чтобы пустить, добавьте ID в TG_ALLOWED_USERS.")
+            await client.send_message(admin, text, buttons=buttons)
         except Exception:
-            log.warning("Не удалось уведомить админа %s (он должен сначала написать боту)", admin)
+            log.warning("Не удалось уведомить админа %s — он должен сначала написать боту", admin)
+
+
+async def grant(user_id: int) -> None:
+    users.add(user_id)
+    requested.discard(user_id)
+    try:
+        await client.send_message(user_id, "Доступ открыт.\n\n" + HELP)
+    except Exception:
+        log.warning("Не удалось уведомить пользователя %s о доступе", user_id)
+
+
+async def admin_command(event) -> None:
+    command, _, arg = event.raw_text.partition(" ")
+    command, arg = command.split("@")[0], arg.strip()
+    if command == "/users":
+        lines = [await describe(uid) for uid in sorted(users.ids)]
+        await event.reply("Есть доступ:\n" + "\n".join(lines) if lines else "Пока никого, кроме админов.")
+    elif command in ("/allow", "/deny") and arg.lstrip("-").isdigit():
+        user_id = int(arg)
+        if command == "/allow":
+            await grant(user_id)
+            await event.reply(f"Доступ выдан: {await describe(user_id)}")
+        elif users.remove(user_id):
+            await event.reply(f"Доступ забран: {await describe(user_id)}")
+        else:
+            await event.reply("Такого пользователя нет в списке.")
+    else:
+        await event.reply(HELP + ADMIN_HELP)
+
+
+@client.on(events.CallbackQuery(pattern=rb"(allow|reject):(-?\d+)"))
+async def on_access_button(event) -> None:
+    if not is_admin(event.sender_id):
+        await event.answer("Только для админа.")
+        return
+    action, user_id = event.pattern_match.group(1).decode(), int(event.pattern_match.group(2))
+    if action == "allow":
+        await grant(user_id)
+        await event.edit(f"✅ Доступ выдан: {await describe(user_id)}")
+    else:
+        await event.edit(f"❌ Отклонено: {await describe(user_id)}")
 
 
 @client.on(events.NewMessage(incoming=True))
 async def on_message(event) -> None:
-    if not settings.is_allowed(event.sender_id):
-        await deny(event)
+    if not is_allowed(event.sender_id):
+        await request_access(event)
+        return
+    if event.raw_text.startswith("/") and is_admin(event.sender_id):
+        await admin_command(event)
         return
     mime = event.file.mime_type if event.file else ""
     try:
@@ -163,8 +250,8 @@ async def on_message(event) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    log.info("Доступ: %s, админов: %d, разрешено: %d", settings.access_mode, len(settings.tg_admins),
-             len(settings.tg_allowed_users))
+    log.info("Доступ: %s, админов: %d, пользователей: %d", settings.access_mode, len(settings.tg_admins),
+             len(users.ids))
     log.info("Подключение к Telegram %s", f"через {connection.__name__}" if proxy else "напрямую")
     client.start(bot_token=settings.tg_token.get_secret_value())
     log.info("Бот запущен")
