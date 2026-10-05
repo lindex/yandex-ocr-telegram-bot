@@ -432,20 +432,16 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptg" },
-    { name = "cryptography" },
     { name = "pydantic-settings" },
     { name = "telethon" },
-    { name = "telethonfaketls" },
     { name = "yandex-ai-studio-sdk" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "cryptg", specifier = ">=0.5" },
-    { name = "cryptography", specifier = ">=44" },
     { name = "pydantic-settings", specifier = ">=2.15" },
     { name = "telethon", specifier = ">=1.45" },
-    { name = "telethonfaketls", specifier = "==2022.4.4.16.37.38.728726" },
     { name = "yandex-ai-studio-sdk", specifier = ">=0.22" },
 ]
 
@@ -657,16 +653,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/d5/07/b23b6cc73cd994763
 wheels = [
     { url = "https://files.pythonhosted.org/packages/92/ac/241c09e6905215f225d8088438ceb1f32cc4b4865f3f49068cb402debfd7/telethon-1.45.0-py3-none-any.whl", hash = "sha256:339e24c83aedc9f12cbe389264627edc49779e4289c535aa90aafc4ce62f7972", size = 804098, upload-time = "2026-09-10T14:28:03.115Z" },
 ]
-
-[[package]]
-name = "telethonfaketls"
-version = "2022.4.4.16.37.38.728726"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cryptography" },
-    { name = "telethon" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/24/3a/fc856b056e2df014c62214eb441f0ec1cf1e0d94d04b27cd3bb317e2538b/TelethonFakeTLS-2022.4.4.16.37.38.728726.tar.gz", hash = "sha256:1a3c63ad2ec50c24f89256cd006273238248a9b5197aa80564f4477faa095aa7", size = 16667, upload-time = "2022-04-04T12:07:57.297Z" }
 
 [[package]]
 name = "typing-extensions"

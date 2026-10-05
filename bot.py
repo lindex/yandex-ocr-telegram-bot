@@ -13,12 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from telethon import Button, TelegramClient, events
-from telethon.network.connection import (
-    ConnectionTcpFull,
-    ConnectionTcpMTProxyIntermediate,
-    ConnectionTcpMTProxyRandomizedIntermediate,
-)
-from TelethonFakeTLS import ConnectionTcpMTProxyFakeTLS
+from telethon.network.connection import ConnectionTcpFull, ConnectionTcpMTProxyRandomizedIntermediate
 from yandex_ai_studio_sdk import AsyncAIStudio
 
 
@@ -83,19 +78,20 @@ ADMIN_HELP = ("\n\nКоманды админа:\n"
 log = logging.getLogger("ocr_bot")
 
 
-def parse_proxy(link: str) -> tuple[type, tuple[str, int, str]]:
-    """tg://proxy-ссылка -> (класс соединения Telethon, (host, port, secret)) по типу секрета."""
+def parse_proxy(link: str) -> tuple[str, int, str]:
+    """tg://proxy-ссылка -> (host, port, 16-байтный ключ в hex).
+
+    Секрет бывает обычным (16 байт), dd (dd + ключ) или fake-TLS (ee + ключ + домен). Ключ во всех трёх один,
+    поэтому подключаемся в режиме dd, который Telethon умеет сам. Сервер (telemt) должен разрешать этот режим.
+    """
     query = {k: v[0] for k, v in parse_qs(urlparse(link).query).items()}
-    host, port, secret = query["server"], int(query["port"]), query["secret"]
+    secret = query["secret"]
     try:
         raw = bytes.fromhex(secret)
     except ValueError:
         raw = base64.urlsafe_b64decode(secret + "=" * (-len(secret) % 4))
-    if raw[0] == 0xEE:  # fake-TLS: 16 байт ключа + домен маскировки
-        return ConnectionTcpMTProxyFakeTLS, (host, port, raw[1:].hex())
-    if raw[0] == 0xDD:
-        return ConnectionTcpMTProxyRandomizedIntermediate, (host, port, raw.hex())
-    return ConnectionTcpMTProxyIntermediate, (host, port, raw.hex())
+    key = raw[1:17] if raw[0] in (0xDD, 0xEE) and len(raw) > 16 else raw[:16]
+    return query["server"], int(query["port"]), key.hex()
 
 
 settings = Settings()
@@ -105,8 +101,8 @@ sdk = AsyncAIStudio(folder_id=settings.yc_folder_id, auth=settings.yc_api_key.ge
 ocr = sdk.vision.ocr(language_codes=["ru", "en"], model="page")
 tts = sdk.speechkit.tts(voice=settings.tts_voice, audio_format="OGG_OPUS", single_chunk_mode=True)
 
-connection, proxy = (parse_proxy(settings.tg_proxy.get_secret_value()) if settings.tg_proxy
-                     else (ConnectionTcpFull, None))
+proxy = parse_proxy(settings.tg_proxy.get_secret_value()) if settings.tg_proxy else None
+connection = ConnectionTcpMTProxyRandomizedIntermediate if proxy else ConnectionTcpFull
 client = TelegramClient(str(settings.data_dir / "bot"), settings.tg_api_id, settings.tg_api_hash.get_secret_value(),
                         connection=connection, proxy=proxy)
 client.parse_mode = None
@@ -252,7 +248,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     log.info("Доступ: %s, админов: %d, пользователей: %d", settings.access_mode, len(settings.tg_admins),
              len(users.ids))
-    log.info("Подключение к Telegram %s", f"через {connection.__name__}" if proxy else "напрямую")
+    log.info("Подключение к Telegram %s", f"через MTProxy {proxy[0]}:{proxy[1]}" if proxy else "напрямую")
     client.start(bot_token=settings.tg_token.get_secret_value())
     log.info("Бот запущен")
     client.run_until_disconnected()

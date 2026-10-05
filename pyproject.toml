@@ -5,9 +5,7 @@ description = "Telegram-бот: OCR, синтез и распознавание 
 requires-python = ">=3.13,<3.15"
 dependencies = [
     "cryptg>=0.5",
-    "cryptography>=44",
     "telethon>=1.45",
-    "telethonfaketls==2022.4.4.16.37.38.728726",
     "pydantic-settings>=2.15",
     "yandex-ai-studio-sdk>=0.22",
 ]

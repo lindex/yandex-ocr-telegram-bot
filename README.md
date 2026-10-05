@@ -10,11 +10,11 @@ Telegram-бот, который превращает картинки и гол�
 
 **Зачем он нужен:** быстро вытащить текст со скриншота, документа или фото доски; прочитать голосовое, когда слушать неудобно; озвучить текст.
 
-Бот подключается к Telegram по MTProto (Telethon), а не через Bot API. Поэтому он работает через MTProto-прокси (в том числе fake-TLS, `ee…`) там, где `api.telegram.org` заблокирован.
+Бот подключается к Telegram по MTProto (Telethon), а не через Bot API. Поэтому он работает через MTProto-прокси там, где `api.telegram.org` заблокирован: Bot API — это HTTPS, и MTProto-прокси для него не подходит.
 
 ## Стек
 
-Python 3.13 · [Telethon](https://github.com/LonamiWebs/Telethon) + [TelethonFakeTLS](https://github.com/RevEngine3r/telethon-faketls) · [yandex-ai-studio-sdk](https://pypi.org/project/yandex-ai-studio-sdk/) · pydantic-settings · uv · Docker
+Python 3.13 · [Telethon](https://github.com/LonamiWebs/Telethon) · [yandex-ai-studio-sdk](https://pypi.org/project/yandex-ai-studio-sdk/) · pydantic-settings · uv · Docker
 
 ## Настройка
 
@@ -31,7 +31,7 @@ Python 3.13 · [Telethon](https://github.com/LonamiWebs/Telethon) + [TelethonFak
 
 1. Создайте бота у [@BotFather](https://t.me/BotFather) командой `/newbot` и возьмите токен — `TG_TOKEN`.
 2. На [my.telegram.org](https://my.telegram.org) → **API development tools** создайте приложение и возьмите `api_id` и `api_hash` — `TG_API_ID`, `TG_API_HASH`. Они нужны Telethon для MTProto; бот всё равно входит по своему токену, а не под вашим аккаунтом.
-3. Если Telegram на сервере заблокирован — укажите ссылку MTProto-прокси в `TG_PROXY` как есть: `tg://proxy?server=…&port=…&secret=…` (подходят и `https://t.me/proxy?…`). Тип секрета (`ee`, `dd`, обычный) определяется автоматически.
+3. Если Telegram на сервере заблокирован — укажите ссылку MTProto-прокси в `TG_PROXY` как есть: `tg://proxy?server=…&port=…&secret=…` (подходят и `https://t.me/proxy?…`). Секрет может быть обычным, `dd…` или `ee…` (fake-TLS): из него берётся ключ, и бот подключается в режиме `dd`. Прокси-сервер должен разрешать этот режим (в telemt — включённый `secure`).
 
 ### 3. Доступ
 
