@@ -1,5 +1,13 @@
 # OCR Bot Yandex
 
+![Python](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)
+![Telethon](https://img.shields.io/badge/Telethon-MTProto-26A5E4?logo=telegram&logoColor=white)
+![Yandex AI Studio](https://img.shields.io/badge/Yandex-AI%20Studio-FC3F1D)
+![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
+> Telegram bot for OCR (images & PDF), speech-to-text and text-to-speech powered by Yandex AI Studio. Works over MTProto, so it can connect through an MTProto proxy (including fake-TLS secrets) where the Bot API is blocked. Docs below are in Russian.
+
 Telegram-бот, который превращает картинки и голос в текст, а текст — в голос. Под капотом — сервисы Yandex AI Studio.
 
 | Что прислать боту | Что он ответит | Сервис |
@@ -11,6 +19,13 @@ Telegram-бот, который превращает картинки и гол�
 **Зачем он нужен:** быстро вытащить текст со скриншота, документа или фото доски; прочитать голосовое, когда слушать неудобно; озвучить текст.
 
 Бот подключается к Telegram по MTProto (Telethon), а не через Bot API. Поэтому он работает через MTProto-прокси там, где `api.telegram.org` заблокирован: Bot API — это HTTPS, и MTProto-прокси для него не подходит.
+
+## Особенности
+
+- **Один файл, ~250 строк** — без фреймворков, всё читается за пару минут.
+- **MTProto вместо Bot API** — работает через MTProto-прокси; ссылку `tg://proxy?…` или `https://t.me/proxy?…` можно вставить как есть, секреты `dd…` и `ee…` (fake-TLS) разбираются автоматически.
+- **Доступ управляется из чата** — запрос приходит админу с кнопками, плюс `/allow`, `/deny`, `/users`; без перезапуска.
+- **Готов к деплою** — многоэтапный Dockerfile на uv, непривилегированный пользователь, данные в отдельном томе.
 
 ## Стек
 
@@ -98,3 +113,7 @@ uv run python test_bot.py
 
 - Файлы больше 20 МБ не принимаются.
 - Пока админ не ответил на запрос, повторные сообщения от того же человека новых запросов не создают. После рестарта бота запрос может прийти ещё раз.
+
+## Лицензия
+
+[MIT](LICENSE)
